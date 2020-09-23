@@ -1,6 +1,6 @@
 # SafeSide
 
-[![Travis build status](https://travis-ci.org/google/safeside.svg?branch=master)](https://travis-ci.org/google/safeside)
+[![Travis build status](https://travis-ci.org/google/safeside.svg?branch=main)](https://travis-ci.org/google/safeside)
 
 SafeSide is a project to understand and mitigate *software-observable side-channels*: information leaks between software domains caused by implementation details _outside_ the software abstraction.
 
@@ -110,6 +110,10 @@ For example:
 ## Contributing
 
 We eagerly welcome contributions. Please take a look at our [contributing guidelines](CONTRIBUTING.md) for more on how to engage with the project.
+
+### License
+
+Safeside is dual-licensed under both the [3-Clause BSD License](LICENSE) and [GPLv2](LICENSE.GPL-2.0). You may choose either license.
 
 ## Questions?
 

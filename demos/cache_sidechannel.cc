@@ -1,30 +1,24 @@
 /*
  * Copyright 2019 Google LLC
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under both the 3-Clause BSD License and the GPLv2, found in the
+ * LICENSE and LICENSE.GPL-2.0 files, respectively, in the root directory.
  *
- *   https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
  */
-
-#include "cache_sidechannel.h"
 
 #include <list>
 #include <vector>
 
+#include "asm/measurereadlatency.h"
+#include "cache_sidechannel.h"
 #include "instr.h"
+#include "utils.h"
 
 // Returns the indices of the biggest and second-biggest values in the range.
 template <typename RangeT>
-static std::pair<size_t, size_t> top_two_indices(const RangeT &range) {
-  std::pair<size_t, size_t> result = {0, 0};  // first biggest, second biggest
+static std::pair<size_t, size_t> TwoTwoIndices(const RangeT &range) {
+  std::pair<size_t, size_t> result = {256, 256};  // first and second biggest
   for (size_t i = 0; i < range.size(); ++i) {
     if (range[i] > range[result.first]) {
       result.second = result.first;
@@ -45,8 +39,9 @@ void CacheSideChannel::FlushOracle() const {
   // speculative execution, that will warm the cache for that entry, which
   // can be detected later via timing analysis.
   for (BigByte &b : padded_oracle_array_->oracles_) {
-    CLFlush(&b);
+    FlushDataCacheLineNoBarrier(&b);
   }
+  MemoryAndSpeculationBarrier();
 }
 
 std::pair<bool, char> CacheSideChannel::RecomputeScores(
@@ -55,7 +50,7 @@ std::pair<bool, char> CacheSideChannel::RecomputeScores(
   size_t best_val = 0, runner_up_val = 0;
 
   // Here's the timing side channel: find which char was loaded by measuring
-  // latency. Indexing into isolated_oracle causes the relevant region of
+  // latency. Indexing into oracle causes the relevant region of
   // memory to be loaded into cache, which makes it faster to load again than
   // it is to load entries that had not been accessed.
   // Only two offsets will have been accessed: safe_offset_char (which we
@@ -68,12 +63,11 @@ std::pair<bool, char> CacheSideChannel::RecomputeScores(
     // them all equally fast. Therefore it is necessary to confuse them by
     // accessing the offsets in a pseudo-random order.
     size_t mixed_i = ((i * 167) + 13) & 0xFF;
-    const void *timing_entry = &GetOracle()[mixed_i];
-    latencies[mixed_i] = ReadLatency(timing_entry);
+    latencies[mixed_i] = MeasureReadLatency(&GetOracle()[mixed_i]);
   }
 
   std::list<uint64_t> sorted_latencies_list(latencies.begin(), latencies.end());
-  // We have to used the std::list::sort implementation, because invocations of
+  // We have to use the std::list::sort implementation, because invocations of
   // std::sort, std::stable_sort, std::nth_element and std::partial_sort when
   // compiled with optimizations intervene with the neural network based AMD
   // memory disambiguation dynamic predictor and the Spectre v4 example fails
@@ -108,7 +102,7 @@ std::pair<bool, char> CacheSideChannel::RecomputeScores(
     }
   }
 
-  std::tie(best_val, runner_up_val) = top_two_indices(scores_);
+  std::tie(best_val, runner_up_val) = TwoTwoIndices(scores_);
   return std::make_pair((scores_[best_val] > 2 * scores_[runner_up_val] + 40),
                         best_val);
 }

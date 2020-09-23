@@ -1,17 +1,10 @@
 /*
  * Copyright 2019 Google LLC
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Licensed under both the 3-Clause BSD License and the GPLv2, found in the
+ * LICENSE and LICENSE.GPL-2.0 files, respectively, in the root directory.
  *
- *   https://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0
  */
 
 #include <array>
@@ -20,6 +13,7 @@
 
 #include "cache_sidechannel.h"
 #include "instr.h"
+#include "utils.h"
 
 // Objective: given some control over accesses to the *non-secret* string
 // "xxxxxxxxxxxxxx", construct a program that obtains "It's a s3kr3t!!!" without
@@ -30,7 +24,6 @@
 const char *public_data = "xxxxxxxxxxxxxxxx";
 const char *private_data = "It's a s3kr3t!!!";
 constexpr size_t kAccessorArrayLength = 1024;
-constexpr size_t kCacheLineSize = 64;
 
 // DataAccessor provides an interface to access bytes from either the public or
 // the private storage.
@@ -78,7 +71,7 @@ class CensoringDataAccessor: public DataAccessor {
 // CensoringDataAccessor.
 static char LeakByte(size_t offset) {
   CacheSideChannel sidechannel;
-  const std::array<BigByte, 256> &isolated_oracle = sidechannel.GetOracle();
+  const std::array<BigByte, 256> &oracle = sidechannel.GetOracle();
   auto array_of_pointers =
       std::unique_ptr<std::array<DataAccessor *, kAccessorArrayLength>>(
           new std::array<DataAccessor *, kAccessorArrayLength>());
@@ -123,14 +116,12 @@ static char LeakByte(size_t offset) {
       // We make sure to flush whole accessor object in case it is
       // hypothetically on multiple cache-lines.
       const char *accessor_bytes = reinterpret_cast<const char*>(accessor);
-      for (size_t j = 0; j < object_size_in_bytes; j += kCacheLineSize) {
-        CLFlush(accessor_bytes + j);
-      }
+      FlushFromDataCache(accessor_bytes, accessor_bytes + object_size_in_bytes);
 
       // Speculative fetch at the offset. Architecturally it fetches
       // always from the public_data, though speculatively it fetches the
       // private_data when i is at the local_pointer_index.
-      ForceRead(isolated_oracle.data() + static_cast<size_t>(
+      ForceRead(oracle.data() + static_cast<size_t>(
           accessor->GetDataByte(offset, read_private_data)));
     }
 
